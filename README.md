@@ -207,7 +207,10 @@ Event (Canonical Schema v1) {
   provider_state?: "discovered" | "validated" | "certified" | "registered" | "active" | "revoked_endpoint" | "revoked_provider"
   discovery_confidence?: "unauthenticated" | "authenticated" | "verified"
   hash: SHA-3
-  signature: Dilithium (Post-Quantum)
+  signature: {
+    broker: Dilithium
+    core: Dilithium
+  }
   timestamp: hybrid_logical (HLC)
 }
 ```
@@ -217,7 +220,7 @@ Hybrid Logical Clock is encoded as `{ wall_time_unix_ms: u64, counter: u32, node
 
 **Schema Extension Rule:** `DISCOVERY_EVENT` is a specialization of `Event` with `type = DISCOVERY` and additional required fields `{endpoint_hash, auth_used, response_hash, model_count, discovery_confidence}`.
 
-**Discovery Event Authority:** DISCOVERY_EVENT must be signed by the **Execution Broker Key** and countersigned by Core Law before Ledger commit. This ensures discovery telemetry follows the same authority chain as execution events.
+**Discovery Event Authority:** DISCOVERY_EVENT must be signed by the **Execution Broker Key** and countersigned by Core Law before Ledger commit. Core Law MUST verify the Broker signature and attach its own cryptographic signature before the event is written to the Audit Ledger. This ensures discovery telemetry follows the same authority chain as execution events.
 
 **Provider Event Rule:** Providers may only return responses to the Execution Broker. All externally sourced events must be re-issued, signed, and attributed by the Broker before entering the Audit Ledger.
 
@@ -340,8 +343,8 @@ Models discovered without authentication:
 
 - Scan for running Local AI endpoints (e.g., `http://localhost:11434`)
 - Detect installed CLI agents via binary path resolution
-- Probe MCP servers and Logical Providers and record current provider status
-- Record provisional endpoints and binaries as UNVALIDATED
+- Probe MCP servers and Logical Providers and record current ProviderState
+- Record provisional endpoints and binaries in ProviderState = DISCOVERED
 
 **2. Validate**
 
@@ -379,6 +382,13 @@ When a Provider enters REVOKED_ENDPOINT:
 - All cached model manifests are purged
 - Core Law automatically transitions the Logical Provider to DISCOVERED
 - A full VALIDATED → CERTIFIED → REGISTERED → ACTIVE cycle is required before execution is re-enabled
+
+**Certification Hash State Rule:**
+STALE certification hashes:
+- Remain in the Audit Ledger for historical verification
+- Are excluded from Provider Registry caches
+- MUST NOT be referenced by any ACTIVE or REGISTERED Provider
+- Are rejected by Law Export as valid authority proofs
 
 **4. Register**
 
@@ -451,6 +461,9 @@ When RegistryState = QUARANTINED:
 - No fallback routing may occur
 - No MCP servers may inject context
 - UI is limited to Export, Ledger Repair, and Policy View
+
+**Execution Override Rule:**
+When RegistryState = QUARANTINED, all Providers are treated as execution-ineligible regardless of ProviderState.
 
 **Windows Security Binding**
 
@@ -973,12 +986,14 @@ All MCP responses must be wrapped in a Signed Context Envelope issued by the Pro
   - **Budget Authority Rule:** The Budget Agent may propose a transition to BUDGET_PAUSED. Core Law must validate policy compliance and cryptographically sign the transition before it is committed to the Audit Ledger.
   - **Authority Rule:** The Budget Agent may autonomously transition the system into BUDGET_PAUSED state but may never transition the system out of it. Resume authority is restricted to Architect or Owner signatures.
   - **Budget Pause Rule:** BUDGET_PAUSED does not modify ProviderState. It globally blocks transition into SWARM_DEPLOYED regardless of ProviderState.
+  - **Budget Grace Rule:** When entering BUDGET_PAUSED, in-flight executions are allowed a maximum grace period (default 5 minutes). After expiry, the Broker MUST terminate remaining tasks and emit FAILURE events signed by Core Law.
   - **Budget Pause TTL Rule:**  
 BUDGET_PAUSED must include a signed expiration timestamp (default 24h). On expiry, the system transitions to SPEC_LOCKED and requires human revalidation before redeployment.
   - **Hard Spending Caps:** Users can set a "Daily Token Budget" per project. If the Swarm reaches 90% of the budget, OmniParser pauses and triggers a "Budget Alert" popup.
   - **Budget Override Authority:** Only an Architect or Owner may raise spending caps or resume a paused swarm. All overrides require a signed justification recorded in the Audit Ledger.
   - **Spec Lock Dependency:** A paused swarm may only be resumed if system state is SPEC_LOCKED. Budget overrides cannot bypass spec validation or domain coverage gates.
   - **Cost Normalization Law:** All Provider costs must be normalized into `(InputTokens × Rate_in) + (OutputTokens × Rate_out) + (ToolCalls × Rate_tool) + (Modalities × Rate_modality)` before budget comparison is applied.
+    - **Token Unit Definition:** A normalized token is defined as the provider-reported token unit for UTF-8 encoded text, mapped to a canonical integer count by the Adapter using the Provider Registry's conversion table.
     - **Unit Binding Rule:** All Providers must report token usage in normalized UTF-8 token units as defined by the Provider Registry. Adapters must convert provider-native token metrics into this unit before cost calculation.
 
 ### 📡 Normalized Request Protocol (NRP)
@@ -1142,7 +1157,7 @@ Users don't need to know the code; they only need to know the "Vibe."
 - **Kinetic Bento Grid:** A highly optimized UI using `OffscreenCanvas` and `Web Workers` to visualize the "Agent Swarm" activity in real-time. Physics calculations for the Dependency Map are handled by background threads to ensure the main UI remains responsive.
 - **Windows 11 Mica Effect:** Translucent app window that adopts the user's desktop color for seamless OS integration.
 - **Tactile Feedback:** When an agent is "Thinking," task cards pulse with subtle, high-frequency animations.
-- **The Swarm View:** A hexagonal grid displaying all **registry-visible Providers**—CERTIFIED ones glow, fallback and virtual providers are dimmed.
+- **The Swarm View:** A hexagonal grid displaying all **registry-visible Providers**—ACTIVE ones glow, CERTIFIED are dim-highlighted, fallback and virtual providers are dimmed.
   - **Efficiency Benchmarking:** The hexagonal grid also displays real-time "Accuracy %" and "Token Density" metrics for each certified AI Provider. You can see at a glance which AI is delivering the highest accuracy and efficiency for your workload.
 - **Spatial Dependency Map:** A visual canvas showing how a single line of Markdown in one file "gathers" data from three other files to create a sub-task.
 - **Project Health Dashboard:** Real-time operational metrics for project governance:
