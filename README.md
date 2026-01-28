@@ -53,6 +53,9 @@ System execution is governed by:
 - Health state
 - Policy and budget constraints
 
+**Provider lifecycle and routing visibility are governed by ProviderState.**
+**Execution eligibility is governed solely by `ProviderState = ACTIVE`.**
+
 No Provider may execute tasks unless it follows:
 DISCOVERED → VALIDATED → CERTIFIED → REGISTERED → ACTIVE
 
@@ -212,7 +215,7 @@ Event (Canonical Schema v1) {
 **HLC Definition:**  
 Hybrid Logical Clock is encoded as `{ wall_time_unix_ms: u64, counter: u32, node_id: u16 }` and serialized in little-endian binary form before hashing and signing.
 
-**Schema Extension Rule:** `DISCOVERY_EVENT` is a specialization of `Event` with `type = DISCOVERY` and additional required fields `{endpoint_hash, auth_used, response_hash, model_count}`.
+**Schema Extension Rule:** `DISCOVERY_EVENT` is a specialization of `Event` with `type = DISCOVERY` and additional required fields `{endpoint_hash, auth_used, response_hash, model_count, discovery_confidence}`.
 
 **Discovery Event Authority:** DISCOVERY_EVENT must be signed by the **Execution Broker Key** and countersigned by Core Law before Ledger commit. This ensures discovery telemetry follows the same authority chain as execution events.
 
@@ -369,6 +372,14 @@ Providers in `DISCOVERY_MODE = MANUAL` are considered *Discovered* once base end
 
 **Endpoint Mutation Rule:** If Base URL hash or TLS fingerprint changes, Provider MUST transition to REVOKED_ENDPOINT state and return to DISCOVERED state with the same Logical Provider ID but new Endpoint Instance ID.
 
+**REVOKED_ENDPOINT Transition Rule:**
+When a Provider enters REVOKED_ENDPOINT:
+- Endpoint Instance ID is invalidated in the Registry and Ledger
+- Certification Hash is marked STALE
+- All cached model manifests are purged
+- Core Law automatically transitions the Logical Provider to DISCOVERED
+- A full VALIDATED → CERTIFIED → REGISTERED → ACTIVE cycle is required before execution is re-enabled
+
 **4. Register**
 
 - Insert Provider into the live Provider Registry
@@ -391,7 +402,7 @@ Providers in `DISCOVERY_MODE = MANUAL` are considered *Discovered* once base end
 - **Endpoint Instance ID:** Bound to specific Base URL + TLS fingerprint, revoked on mutation
 - Fallback endpoints inherit **Logical Provider ID** but receive new **Endpoint Instance ID**
 
-**Hard Law:** No Provider may execute a task unless it is **Discovered, Certified, and Registered**.
+**Hard Law:** No Provider may execute a task unless its `ProviderState = ACTIVE` (CERTIFIED + REGISTERED + POLICY_PASS + HEALTHY).
 
 **Canonical Install Layout**
 
@@ -959,6 +970,7 @@ All MCP responses must be wrapped in a Signed Context Envelope issued by the Pro
 - **Sensitive Logic / PII:** Forced to run on a **CERTIFIED Provider that satisfies the active policy rule `ALLOW_PII = true` and `NETWORK_ACCESS = false`.**
 - **Boilerplate / Simple UI:** Routed to **Groq** for sub-second execution.
 - **The "CFO" Budget Agent:** A specialized background monitor that calculates the estimated token cost of a task before it is sent to the swarm.
+  - **Budget Authority Rule:** The Budget Agent may propose a transition to BUDGET_PAUSED. Core Law must validate policy compliance and cryptographically sign the transition before it is committed to the Audit Ledger.
   - **Authority Rule:** The Budget Agent may autonomously transition the system into BUDGET_PAUSED state but may never transition the system out of it. Resume authority is restricted to Architect or Owner signatures.
   - **Budget Pause Rule:** BUDGET_PAUSED does not modify ProviderState. It globally blocks transition into SWARM_DEPLOYED regardless of ProviderState.
   - **Budget Pause TTL Rule:**  
@@ -1039,7 +1051,8 @@ Logical Providers are segmented by **ProviderState** to prevent cascade failure:
 - **CERTIFIED:** Identity verified, not yet registered
 - **VALIDATED:** Health checks passed, awaiting certification
 - **DISCOVERED:** Endpoint reachable, awaiting validation
-- **REVOKED:** Fully isolated; blocked from all operations
+- **REVOKED_ENDPOINT:** Endpoint Instance invalidated; Logical Provider returns to DISCOVERED
+- **REVOKED_PROVIDER:** Logical Provider fully isolated; blocked from all operations (terminal)
 
 ---
 
@@ -1144,7 +1157,7 @@ Users don't need to know the code; they only need to know the "Vibe."
 
 ## ⚙️ Provider Control Panel (User Configuration Law)
 
-OmniParser exposes all **certified AI Providers** through a unified **Provider Control Panel**, accessible from the top-left **⚙️ Gear Menu** in the application UI. This is the **only** place where Providers can be enabled, configured, or authorized.
+OmniParser exposes all **registered AI Providers** through a unified **Provider Control Panel**, accessible from the top-left **⚙️ Gear Menu** in the application UI. This is the **only** place where Providers can be enabled, configured, or authorized.
 
 ### Provider Selection & Activation
 - Users can **enable or disable Providers** individually.
