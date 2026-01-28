@@ -922,6 +922,8 @@ CERTIFICATION requires:
 **Cost Enforcement Rule:**
 
 Users may enable any Provider Adapter. Routing, quorum, and governance eligibility of **Logical Providers** are restricted by certification and cost model:
+Cost model classification modifies routing preference and quorum eligibility only.
+It MUST NOT override `ProviderState = ACTIVE` as the sole execution gate.
 - `verified`: Eligible for quorum voting and Governed Mode
 - `user-declared`: Eligible for routing but excluded from quorum
 - `heuristic`: Restricted to simulation and non-quorum execution
@@ -952,7 +954,7 @@ Direct filesystem, network, or shell access from agents is **strictly prohibited
 
 UNCERTIFIED MCP servers:
 - May be used for simulation and capability planning
-- May NOT be used for Security, Legal, or Identity domains
+- May NOT be used for Security, Legal, or Infrastructure domains
 
 REVOKED MCP servers:
 - Are fully blocked
@@ -1055,6 +1057,10 @@ Discovery mode and Registry state are orthogonal properties.
 **Provider Identity Rule:** Provider IDs refer to logical identities, not physical endpoints.
 Fallback endpoints inherit the Provider ID they replace and do not increase registry cardinality.
 
+**Fallback Telemetry Rule:**
+Fallback endpoints inherit the Logical Provider ID but MUST expose a distinct Endpoint Instance ID.
+UI and Registry MUST surface Endpoint Instance ID for health, latency, and capability metrics to prevent telemetry ambiguity.
+
 **Offline Exception:** During first-run or air-gapped operation, the Provider Registry may enter a TEMPORARY_DEGRADED state where certified fallback providers are virtualized locally until cloud endpoints are reachable. All active Providers must pass certification and policy validation before entering SWARM_DEPLOYED state.
 
 ### 🧯 Failure Containment (State-Based)
@@ -1121,9 +1127,15 @@ Logical Providers are segmented by **ProviderState** to prevent cascade failure:
       auth_used: true | false
       response_hash
       model_count
+      discovery_confidence
       timestamp
+      signature: {
+        broker
+        core
+      }
     }
     ```
+    This structure is a projection of the canonical Event schema and does not weaken signature requirements.
     UI must allow:
     - "View Discovery Proof"
     - Showing raw response hash + endpoint + trust label
