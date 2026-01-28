@@ -46,7 +46,7 @@ All communication paths are **typed, versioned, and cryptographically signed**.
 
 OmniParser does not enforce a minimum or maximum number of Providers.
 
-Users may enable any combination of Cloud, Local, or CLI Providers.
+Users may enable any combination of Cloud AI, Local AI, or CLI Providers.
 
 System execution is governed by:
 - Provider state (DISCOVERED / VALIDATED / CERTIFIED / REGISTERED / ACTIVE / REVOKED_ENDPOINT / REVOKED_PROVIDER)
@@ -92,6 +92,9 @@ ACTIVE = CERTIFIED + REGISTERED + POLICY_PASS + HEALTHY
 
 Only ACTIVE Providers may execute tasks or participate in quorum.
 
+ACTIVE is necessary but not sufficient for execution. 
+RegistryState MUST be HEALTHY and SystemState MUST be SPEC_LOCKED for any execution to occur.
+
 ### Execution Eligibility Law (Canonical)
 
 **Swarm execution requires ≥ 1 Provider in ACTIVE state.**
@@ -102,11 +105,16 @@ System may operate in DISCOVERY, SIMULATION, and SPEC modes without execution ca
 ```
 ExecutionEligible =
   ProviderState = ACTIVE
-  AND RegistryState ≠ QUARANTINED
+  AND RegistryState = HEALTHY
   AND SystemState = SPEC_LOCKED
 ```
 
 **Quorum Law:** Only Providers with `ProviderState = ACTIVE` may participate in quorum voting or consensus-based task approval.
+
+Quorum requires ≥2 ACTIVE Providers with costModel = verified. 
+If fewer than two verified Providers exist, quorum mode MUST be disabled and system MUST fall back to single-provider execution with explicit UI warning.
+
+When SystemState = BUDGET_PAUSED, quorum participation is suspended regardless of ProviderState.
 
 ### Policy Precedence Law (Canonical)
 
@@ -161,15 +169,20 @@ Purpose: CLI isolation, Provider I/O mediation, Diff generation, Tool mediation
 
 - **Container Runtime:** `Hyper-V VTL1 (Virtual Trust Level 1)` Isolation + Direct `HCS` (Host Compute Service) API calls.
   - **VTL1 Security:** Executes parts of the Broker in a Secure Mode (VTL1) that is invisible and untouchable even by a compromised OS kernel, similar to Windows Credential Guard.
-  - **Silo Containers:** Uses raw HCS API to spin up "Silo" process containers in milliseconds, bypassing Docker overhead.
+  - **Silo Containers:** Uses raw HCS API to spin up "Silo" process containers in milliseconds, optimized for native Windows kernel performance.
   - **Capability Fallback:** If Hyper-V is unavailable (e.g., Windows Home), Broker enters SOFTWARE_SANDBOX mode using Restricted Tokens + Job Objects + Filesystem Overlay + Network Firewall Rules. Providers in DISCOVERED or VALIDATED states are disabled in this mode.
 - **Sandbox Policy Engine:** Windows Defender Application Control (WDAC) + Restricted Tokens + Job Objects + Hyper-V isolation
   - **Enforcement Model:** WDAC governs OmniParser system binaries only. Dynamic CLI agent execution is enforced via Restricted Tokens + Job Objects + Per-Process ACL sandboxing inside Hyper-V containers. WDAC policies are never modified at runtime.
+
+**Execution Network Law:**  
+While in ACTIVE or SWARM_DEPLOYED state, the Execution Broker MUST enforce an outbound firewall rule that blocks all non-essential network traffic from Providers, CLI agents, and MCP servers.  
+All outbound Cloud AI traffic MUST be proxied and authenticated exclusively through the Execution Broker's egress gateway.  
+Temporary egress is permitted only during DISCOVERED and VALIDATED states for discovery and certification.
 - **Filesystem Isolation:** Read-only mounts + Diff overlay
   - **Scope Rule:** Only files within the active workspace root may be mounted read-write into the Diff overlay. System, user home, and Program Files directories are always mounted read-only.
 - **CLI Wrapping Layer:** `Rust` adapters for each agent
 - **Local AI Runtime (Provider Tier):** `Candle` (Hugging Face Rust ML Framework) with `CPU BLAS` (Basic Linear Algebra Subprograms) + `WASM-SIMD` support.
-  - **Reflex Agent Mode:** OmniParser can download quantized `.gguf` models and run them **in-process** using optimized CPU vector instructions (AVX2/AVX-512). This provides instant "Reflex" tasks (syntax checking, ghost tests, diff summarization) on *any* modern laptop without requiring a GPU.
+  - **Reflex Agent Mode:** OmniParser can download quantized `.gguf` models and run them **within the Execution Broker process boundary** using optimized CPU vector instructions (AVX2/AVX-512). This provides instant "Reflex" tasks (syntax checking, ghost tests, diff summarization) on *any* modern laptop without requiring a GPU.
 
 **Hard Law:** All side effects must emit a **Signed Execution Event** before results are accepted by Core Law.
 
@@ -179,7 +192,8 @@ Purpose: CLI isolation, Provider I/O mediation, Diff generation, Tool mediation
 
 Purpose: Normalize all AI providers
 
-- **Transport:** HTTPS (Cloud), HTTP (Local), STDIO → HTTP Bridge (CLI)
+- **Transport:** HTTPS (Cloud AI), HTTP/HTTPS (Local AI), STDIO → HTTP Bridge (CLI)
+  - **CONTEXT Provider Transport Rule:** CONTEXT Providers always route via Broker egress gateway regardless of transport protocol
 - **Schema Validation:** `JSON Schema + Protobuf`
 - **Health & Discovery:** provider-native discovery APIs, optional `/models` polling, and certified static manifest overlay, with failure scoring
 
@@ -194,9 +208,8 @@ Purpose: Audit, Vector Memory, Snapshots, Export
   - **Why LanceDB:** Unlike Qdrant, LanceDB runs entirely in-process (no server overhead) and is optimized for `Apache Arrow` data.
   - **CPU Performance:** Uses Hierarchical Navigable Small World (HNSW) graphs optimized for CPU cache locality, enabling lightning-fast semantic search without needing a GPU accelerator.
   - **Determinism Rule:** Vector embeddings are excluded from Spec Version Hash and reproducibility guarantees. Snapshots must include vector state for restoration but vectors are treated as advisory, not authoritative law.
-  - **Replica Rule:** In Governed Mode, vector generation must be centralized to the Authority Leader. Follower nodes may query vectors but must not generate or mutate embedding state.
 - **Snapshot Store:** `Zstandard-compressed archives`
-- **Search Engine:** Embedded `Meilisearch` binary (bundled, no external service required)
+- **Search Engine:** Embedded `Meilisearch` binary (in-process, no external service or daemon required)
 
 **Hard Law:** All persisted data must be reproducible from Law + Ledger + Snapshots.
 
@@ -208,7 +221,7 @@ All system actions emit events:
 Event (Canonical Schema v1) {
   id: UUID
   schema_version: u32
-  type: SPEC | TASK | EXECUTION | DIFF | APPROVAL | EXPORT | FAILURE | DISCOVERY
+  type: SPEC | TASK | EXECUTION | DIFF | APPROVAL | EXPORT | FAILURE | DISCOVERY | CONTEXT
   source: UI | CORE | BROKER
   causal_refs: UUID[]
   provider_id?: string
@@ -230,20 +243,24 @@ EventStatus:
   PROPOSED  → Broker signature present, Core signature absent
   COMMITTED → Broker + Core signatures present
 ```
-Only **COMMITTED** events may be written to the Audit Ledger, replicated in Governed Mode, or used as authority proofs for State Transitions, Law Export, or Quorum decisions.
+Only **COMMITTED** events may be written to the Audit Ledger or used as authority proofs for State Transitions, Law Export, or Quorum decisions.
 
 **Endpoint Identity Rule:**
-`endpoint_instance_id` MUST be derivable from `{base_url_hash + tls_fingerprint}` and MUST correspond to the `endpoint_hash` used in DISCOVERY_EVENT.
+`endpoint_instance_id` MUST be derivable from `{base_url_hash + tls_fingerprint (if applicable)}` and MUST correspond to the `endpoint_hash` used in DISCOVERY_EVENT.
 
 **HLC Definition:**  
 Hybrid Logical Clock is encoded as `{ wall_time_unix_ms: u64, counter: u32, node_id: u16 }` and serialized in little-endian binary form before hashing and signing.
 
 **HLC Node Identity Rule:**
-In Governed Mode, node_id is assigned from the Raft cluster membership index and MUST be unique within the authority group.
-In Personal and Team Modes, node_id = 0x0001.
+node_id is assigned from the local Authority Registry and MUST be unique within the authority group.
+In single-authority systems, node_id = 0x0001.
+
+Multiple human signers do not imply multiple HLC nodes. All events on a single installation share one node_id regardless of signer count.
 
 **Schema Extension Rule:** `DISCOVERY_EVENT` is a specialization of `Event` with `type = DISCOVERY` and additional required fields `{endpoint_hash, auth_used, response_hash, model_count, discovery_confidence}`.
 DISCOVERY_EVENT fields extend the canonical Event schema and MUST be accepted by all schema validators as a valid specialization.
+
+DISCOVERY_EVENT extensions MUST increment schema_version and declare backward compatibility flags. Core Law MUST reject Discovery Events that extend the schema without a versioned compatibility declaration.
 
 **Discovery Event Authority:** DISCOVERY_EVENT must be signed by the **Execution Broker Key** and countersigned by Core Law before Ledger commit. Core Law MUST verify the Broker signature and attach its own cryptographic signature before the event is written to the Audit Ledger. This ensures discovery telemetry follows the same authority chain as execution events.
 
@@ -253,36 +270,45 @@ DISCOVERY_EVENT fields extend the canonical Event schema and MUST be accepted by
 
 Events are append-only and form the **Causal Chain of Truth**.
 
-### Governance Modes (Single System, Scaled Authority)
+**CONTEXT_EVENT Schema Extension:**
+```rust
+CONTEXT_EVENT (extends Event) {
+  type: CONTEXT
+  context_envelope_hash: SHA-3
+  provider_id: string
+  provider_state: ProviderState
+  normalization_function: string
+  token_count: u32
+  byte_count: u32
+}
+```
 
-**Dependency Boundary Rule:** Personal and Team Modes must operate with zero external services. Governed Mode may bind to external infrastructure (PostgreSQL, Raft peers, Central OPA) provided OmniParser itself does not bundle or require these for installation. External services are treated as optional authority backends, not runtime dependencies of the binary.
+CONTEXT_EVENT is a specialization of Event emitted before MCP context is merged into task execution. All fields are mandatory and must be validated by Core Law before Ledger commit.
 
-**Personal Mode (Default)**
-- UI + Core + Broker + Data Plane run on the same machine
-- No cloud dependency required
-- All secrets stored in Secure Agentic Vault (DPAPI/TPM-backed on Windows)
+### Authority Scope (Single System, Unified Authority)
 
-**Team Mode**
-- Core runs locally
-- Providers + Vector DB optional in private cloud
+**Authority Scope Boundary Rule:**  
+OmniParser always operates as a **local, self-contained system**.  
+External systems may be connected **only as read-only authority mirrors** for governance and audit (compliance archives, policy mirrors, audit export targets).  
+Execution, control plane, MCP servers, Ledger, Vectors, and Spec Engine **always remain local and sovereign.**  
+Cloud AI Providers operate as external economic and execution authorities governed exclusively through the local Provider Control Plane.
 
-**Governed Mode (Regulated / Institutional / High-Compliance Use)**
-- Core replicated (Raft consensus)
-- Shared Audit Ledger (PostgreSQL + cryptographic chaining)
-- Central Policy Server (OPA)
-- **Authority Leader Rule:** Only the Raft-elected leader node may emit signed State Transitions and Spec Version Hashes. Follower nodes may validate but never author authority events.
+**System Unification Law**
 
-**Mode Unification Law**
+OmniParser is a **single, universal system**.
 
-All Governance Modes operate on the **same OmniParser binary, laws, and architecture**.
+There are:
+- No editions
+- No team versions
+- No enterprise variants
+- No feature tiers
 
-Modes differ only in:
-- Authority model (single-user vs. multi-approver)
-- Policy enforcement level
-- Audit and compliance strictness
-- Provider certification and trust requirements
+Differences exist only in:
+- How many humans may sign
+- Which roles they hold
+- How many signatures are required for authority actions
 
-There is no consumer, team, or enterprise edition of OmniParser — only different **governance intensities** applied to the same constitutional system.
+Architecture, execution, security, and capabilities are **identical in all cases**.
 
 ### Windows Distribution & Packaging Law (Non-Negotiable)
 
@@ -294,17 +320,16 @@ A compliant OmniParser build MUST:
 
 - Run on a clean Windows system with **no pre-installed dependencies**
 - Operate in **offline mode** with full Law Engine, Broker, Vault, and certified Local Provider functionality (when available)
-- Degrade gracefully when cloud Providers are unavailable
-- Support both **single-user** and **enterprise-managed** installation flows
+- Degrade gracefully when Providers are unavailable
+- Support **single-host and managed installation flows** via the `.exe` installer
 
-**Installer Formats**
+**Installer Format**
 
 OmniParser SHALL be distributed as:
 
-- **`.exe` Installer** — Consumer / Single-user mode
-- **`.msi` Installer** — IT-managed or multi-user deployment (schools, labs, studios, teams, companies, regulated environments)
+- **`.exe` Installer** — Universal installer for all environments
 
-Both formats must be built from the **same signed binary artifacts**.
+The installer MUST be built from a **single signed binary artifact**.
 
 **Mandatory Installer Payload**
 
@@ -320,7 +345,8 @@ The installer MUST embed:
 
 **Provider Discovery & Certification Law (Non-Negotiable)**
 
-OmniParser MUST NOT bundle, embed, or distribute AI engines, model servers, or CLI agents.
+OmniParser MUST NOT bundle, embed, or distribute external AI services, third-party model servers, or CLI agents.
+Built-in Reflex Agent runtimes and CPU inference engines are classified as internal system components, not Providers.
 
 Instead, OmniParser operates as a **Sovereign Provider Control Plane** and MUST enforce the following lifecycle:
 
@@ -363,9 +389,11 @@ Models discovered without authentication:
 - MUST NOT be eligible for execution
 - MUST NOT be eligible for quorum voting
 - MUST NOT be eligible for budget enforcement
+- Models with discoveryConfidence = "unauthenticated" MUST NOT transition to ProviderState = CERTIFIED, REGISTERED, or ACTIVE under any circumstance.
 
 **1. Discover**
 
+- Discover Cloud AI Providers via user-declared base URLs, OAuth flows, or certified provider presets
 - Scan for running Local AI endpoints (e.g., `http://localhost:11434`)
 - Detect installed CLI agents via binary path resolution
 - Probe MCP servers and Logical Providers and record current ProviderState
@@ -397,6 +425,8 @@ Providers in `DISCOVERY_MODE = MANUAL` are considered *Discovered* once base end
 - Store a **Certification Hash** in the Audit Ledger
 
 **Certification Authority Rule:** Provider Certifications must be signed by the Core Law Authority Key. The Execution Broker may propose certification artifacts, but only Core Law may issue, sign, or revoke a Certification Hash. Certification keys are generated at first boot, stored in the Secure Agentic Vault, and bound to the Owner identity.
+
+Core Law MUST independently re-validate all capability, model, and cost manifests directly against the Provider endpoint or static manifest before signing any Certification Hash. Broker-proposed artifacts are advisory only.
 
 **Endpoint Mutation Rule:** If Base URL hash or TLS fingerprint changes, Provider MUST transition to REVOKED_ENDPOINT state and return to DISCOVERED state with the same Logical Provider ID but new Endpoint Instance ID.
 
@@ -490,6 +520,8 @@ When RegistryState = QUARANTINED:
 **Execution Override Rule:**
 When RegistryState = QUARANTINED, all Providers are treated as execution-ineligible regardless of ProviderState.
 
+RegistryState is a global execution authority layer. When RegistryState ≠ HEALTHY, no ProviderState may be treated as execution-eligible, including ACTIVE Providers.
+
 **Windows Security Binding**
 
 OmniParser MUST integrate with native Windows security primitives:
@@ -523,19 +555,7 @@ OmniParser MUST implement:
 - Automatic rollback on failed update
 - Governance override via private update endpoints or WSUS-compatible feeds
 
-**Governed Deployment Binding**
 
-The `.msi` package MUST support:
-
-```
-msiexec /i omniparser.msi /qn
-```
-
-And allow:
-
-- Pre-seeded policy bundles
-- Pre-configured Provider Registry
-- Cloud Provider disablement via org policy
 
 ### Compliance Binding
 
@@ -557,7 +577,9 @@ Failure to meet these conditions classifies the system as a **Derivative**, not 
 
 To prevent interpretation drift across implementations, OmniParser defines the following canonical terms:
 
-- **Provider:** A logical AI service entity capable of executing tasks (Cloud, Local, or CLI)
+- **Provider:** A logical service entity governed by the ProviderState lifecycle.
+  - **Execution Providers:** CLOUD_AI, LOCAL_AI, CLI_AGENT (may execute tasks)
+  - **Context Providers:** CONTEXT / MCP (may supply non-execution context only)
 - **Endpoint:** The physical network address or executable path of a Provider
 - **Adapter:** Canonical system software component implementing the Provider Abstraction Layer (PAL) contract for a specific Provider class. Adapters are zone-neutral and not subject to trust classification.
 - **Logical Provider ID:** Persistent identifier for a Provider, independent of endpoint changes
@@ -566,19 +588,23 @@ To prevent interpretation drift across implementations, OmniParser defines the f
 - **Registry State:** Operational health status of the Provider Registry (HEALTHY, TEMPORARY_DEGRADED, QUARANTINED)
 - **Discovery Mode:** Method by which Provider models are enumerated (live, manual, static)
 - **Provider State:** Canonical lifecycle and trust state of a Logical Provider (DISCOVERED, VALIDATED, CERTIFIED, REGISTERED, ACTIVE, REVOKED_ENDPOINT, REVOKED_PROVIDER)
-- **Provider Status (UI Alias):** Presentation-only label derived from ProviderState:
+- **Provider Status (UI Alias):** Presentation-only label derived from Logical ProviderState, not Model Trust State. This label applies to Provider registry entries, not individual models. Model-level execution eligibility is governed exclusively by Model Trust Labels (MANDATORY UI LAW).
   - CERTIFIED → ProviderState ∈ {CERTIFIED, REGISTERED, ACTIVE}
   - UNCERTIFIED → ProviderState ∈ {DISCOVERED, VALIDATED}
   - REVOKED → ProviderState ∈ {REVOKED_ENDPOINT, REVOKED_PROVIDER}
 - **Fallback Endpoint:** Operational replacement for unreachable certified provider (participates in routing)
 - **Virtual Provider:** UI-only placeholder for visualization in simulation mode (never executes)
 - **Discovery Class:** Authentication requirement for model discovery (PUBLIC_CATALOG, AUTH_GATED)
-- **Discovery Confidence:** Trust level of discovered models (unauthenticated, authenticated, verified)
+- **Discovery Confidence:** Trust level of discovered models (unauthenticated, authenticated, attested)
 
 **Discovery Confidence Mapping:**
 - `unauthenticated` → Discovered without API key or authentication
 - `authenticated` → Discovered with valid authentication credentials
-- `attested` → Model metadata fetched from a CERTIFIED provider (orthogonal to provider certification)
+- `attested` → Model metadata fetched from a CERTIFIED Execution Provider (orthogonal to provider certification)
+
+**Scope Rule:** DiscoveryConfidence applies only to Execution Providers and model metadata. It MUST NOT be used for CONTEXT / MCP Providers.
+
+This section is normative. Any conflicting definition elsewhere in the document is invalid.
 
 ---
 
@@ -743,9 +769,9 @@ All Providers operate behind a **single, enforceable interface**. Providers are 
 
 **Canonical Adapter Interface:**
 ```ts
-ProviderAdapter {
+ExecutionProviderAdapter {
   id: string
-  type: "cloud" | "local" | "cli"
+  type: "cloud_ai" | "local_ai" | "cli_agent"
 
   capabilities: {
     modalities: ["text", "vision", "audio", "tooling"]
@@ -771,7 +797,7 @@ ProviderAdapter {
     endpoint?: string
     class: "PUBLIC_CATALOG" | "AUTH_GATED"
     authRequiredForModels: boolean
-    discoveryConfidence: "unauthenticated" | "authenticated" | "attested"
+    discoveryConfidence: "unauthenticated" | "authenticated" | "attested"  // N/A for Execution Providers only
     lastRefresh: HLC
   }
 
@@ -784,6 +810,31 @@ ProviderAdapter {
   health(): HealthStatus
   models(): ModelDescriptor[]
   execute(request: NormalizedRequest): NormalizedResponse
+}
+
+ContextProviderAdapter {
+  id: string
+  type: "context"
+
+  discovery: {
+    mode: "live" | "manual" | "static"
+    endpoint?: string
+    class: "PUBLIC_CATALOG" | "AUTH_GATED"
+    lastRefresh: HLC
+  }
+
+  budget: {
+    tokenizationFunction: "default" | "provider-specific"
+    normalizationRate: number  // tokens per byte
+  }
+
+  trust: {
+    state: "discovered" | "validated" | "certified" | "registered" | "active" | "revoked_endpoint" | "revoked_provider"
+    certificationHash: string
+  }
+
+  health(): HealthStatus
+  context(query: ContextRequest): SignedContextEnvelope
 }
 ```
 
@@ -798,39 +849,54 @@ Adapters are canonical system components and are not subject to state classifica
 
 Providers that cannot implement this contract **cannot join the swarm**.
 
-| Pattern | Role | Primary Models |
-|:--------|:-----|:---------------|
+| Pattern | Role | Example Models (Non-Binding UI Presets) |
+|:--------|:-----|:-----------------------------------------|
 | **The Manager** | Task Decomposition & Routing | Claude 3.5 Opus / Gemini 1.5 Pro |
 | **The Workers** | Fast, High-Volume Code Generation | Groq (Llama 3.1), DeepSeek-V3 |
 | **The Auditors** | Multi-Modal Visual & Logic Review | Gemini 1.5 Pro / GPT-4o |
 | **The Fixers** | Local File-System & CLI Execution | Aider / Claude Code / Goose |
 
-### Provider Ecosystem (Certified Cloud, Local, and CLI Providers)
+Routing decisions MUST be based on Provider capabilities and policy, not vendor identity.
+
+### Provider Ecosystem (Certified Cloud AI, Local AI, and CLI Providers)
 
 ## Provider Classes (Canonical, Not Vendor-Bound)
 
-OmniParser recognizes **Provider Classes**, not vendor identities.
+OmniParser recognizes **three execution classes and one context class**. All classes are governed by the same
+ProviderState lifecycle, policy engine, and budget authority.
 
-**Cloud Provider Class**
+**CLOUD_AI Provider Class**
 
-Any HTTPS endpoint implementing:
+Any remote AI service accessible over HTTPS that implements:
 - Native `/models` discovery OR
 - OpenAI-compatible `/v1/models` contract OR
 - Certified static manifest
 
-**Local Provider Class**
+Examples: OpenAI, Anthropic, Google Gemini, Groq, Mistral, Together AI, OpenRouter.
 
-Any localhost HTTP runtime exposing:
+**LOCAL_AI Provider Class**
+
+Any AI runtime executing on the local host exposing:
 - `/models`
 - `/health`
 - Execution endpoint
 
-**CLI Provider Class**
+Examples: Ollama, LM Studio, vLLM (local), llama.cpp servers, Candle runtimes.
+
+**CLI_AGENT Provider Class**
 
 Any executable supporting:
 - `--version`
 - Sandbox execution
 - Diff output contract
+
+Examples: Aider, Claude Code, Gemini CLI, Goose, OpenCode CLI.
+
+**CONTEXT Provider Class (MCP)**
+
+Logical Providers that supply non-execution context only. 
+They may never receive tasks, participate in routing, or vote in quorum. 
+They are governed by the same ProviderState lifecycle but are excluded from Execution Eligibility Law.
 
 **Vendor names MAY appear only as UI presets — never as system law.**
 
@@ -840,7 +906,7 @@ OmniParser MUST ship a **Provider Discovery Adapter Registry**:
 
 ```ts
 DiscoveryAdapter {
-  providerClass: "cloud" | "local"
+  providerClass: "cloud_ai" | "local_ai" | "cli_agent" | "context"
   match: {
     urlPattern?: RegExp
     headerPattern?: RegExp
@@ -852,11 +918,10 @@ DiscoveryAdapter {
 ```
 
 This enables discovery of:
-- OpenAI, Anthropic, Google Gemini
-- OpenRouter, Groq, Mistral AI, Hugging Face, Together AI, Kilo Code
-- Cline, Roo Coder (OAuth)
-- Ollama, LM Studio
-- Generic OpenAI-compatible servers
+- Cloud AI Providers (OpenAI, Anthropic, Google Gemini, Groq, Mistral, Together, OpenRouter)
+- Local AI runtimes (Ollama, LM Studio, vLLM, llama.cpp servers)
+- Self-hosted OpenAI-compatible gateways (TGI, LMDeploy)
+- CLI-based agents and local execution tools
 
 **Without vendor-specific hardcoding.**
 
@@ -885,9 +950,16 @@ This enables discovery of:
 - All tokens are stored encrypted in Secure Agentic Vault
 - Browser-based auth requires user interaction and cannot be automated
 
+OAuth callback servers operate in the UI Shell or Core Law process space and are explicitly excluded from Execution Broker network egress restrictions.
+
+**OAuth Callback Exception Enforcement:**
+Core Law MUST whitelist OAuth callback endpoints in the Execution Broker firewall policy before initiating browser-based authentication flows. Callback endpoints are ephemeral and automatically removed from the whitelist after token exchange completion or 5-minute timeout.
+
 **Discovery Mode:** `MANUAL` (requires OAuth completion before model discovery)
 
 **OAuth Discovery Class Rule:** OAuth Browser-Based Providers are always classified as `DISCOVERY_CLASS = AUTH_GATED` and are ineligible for unauthenticated discovery.
+
+**Air-Gap Policy Rule:** OAuth-based Providers are disabled when `AIR_GAP = true` policy is active. Only CLI and Local AI Providers remain eligible for DISCOVERED state.
 
 ---
 
@@ -895,10 +967,10 @@ This enables discovery of:
 
 **Purpose:**  
 A universal adapter for any endpoint implementing the OpenAI API contract, including:
+- Cloud AI Providers (OpenAI-compatible SaaS)
 - Self-hosted gateways (vLLM, TGI, LMDeploy)
-- Private enterprise inference stacks
+- Local inference stacks
 - Academic model servers
-- Future cloud providers
 
 **Adapter Status:** Canonical System Adapter (Mandatory, Zone-Neutral)  
 **Default State:** DISCOVERED  
@@ -942,14 +1014,16 @@ CERTIFICATION requires:
 - Execution dry-run with ghost tests
 - Owner signature
 
-**Transport Trust Rule:** Logical Providers discovered over non-TLS or unpinned TLS may never be CERTIFIED regardless of other validation criteria. Loopback addresses (127.0.0.0/8, ::1) are exempt from TLS requirements.
+TLS pinning MAY be satisfied by a trusted corporate root certificate when policy `ALLOW_ENTERPRISE_PROXY = true` is active.
+
+**Transport Trust Rule:** Logical Providers discovered over non-TLS or unpinned TLS may never be CERTIFIED regardless of other validation criteria. Loopback addresses (127.0.0.0/8, ::1) are exempt from TLS requirements for LOCAL_AI Providers only.
 
 **Cost Enforcement Rule:**
 
 Users may enable any Provider Adapter. Routing, quorum, and governance eligibility of **Logical Providers** are restricted by certification and cost model:
 Cost model classification modifies routing preference and quorum eligibility only.
 It MUST NOT override `ProviderState = ACTIVE` as the sole execution gate.
-- `verified`: Eligible for quorum voting and Governed Mode
+- `verified`: Eligible for quorum voting and authority validation
 - `user-declared`: Eligible for routing but excluded from quorum
 - `heuristic`: Restricted to simulation and non-quorum execution
 
@@ -957,7 +1031,7 @@ It MUST NOT override `ProviderState = ACTIVE` as the sole execution gate.
 
 ---
 
-**Local Provider Examples (HTTP):**
+**Local AI Provider Examples (HTTP):****
 Ollama, LM Studio, and any OpenAI-compatible localhost endpoint.
 
 **CLI Agent Examples:**
@@ -994,6 +1068,9 @@ MCP servers are treated as **Logical Providers of class "context"** and MUST fol
 MCP context injection MUST be metered in normalized token units and included in Budget Agent preflight cost calculations.
 If projected MCP context would exceed remaining budget or task token limits, Core Law MUST truncate or block context injection before task dispatch.
 
+**MCP Tokenization Rule:**
+MCP context is normalized using `ceil(UTF-8 byte length ÷ 4)` unless a provider-specific tokenization function is declared in the Discovery Adapter Registry. The chosen normalization function MUST be recorded in the Audit Ledger at the time of context injection.
+
 **MCP State Machine:**
 - MCP servers enter the Provider State Machine at DISCOVERED
 - Must pass VALIDATED → CERTIFIED → REGISTERED → ACTIVE before context injection
@@ -1009,13 +1086,21 @@ If projected MCP context would exceed remaining budget or task token limits, Cor
 **MCP Context Authority Rule:**
 All MCP responses must be wrapped in a Signed Context Envelope issued by the Provider Abstraction Layer. Core Law must verify the envelope signature and source ProviderState before allowing MCP data to be merged into task context.
 
+**MCP Network Governance Rule:**
+All MCP network egress MUST be proxied through the Execution Broker egress gateway and is subject to the same firewall, audit, and AIR_GAP policy enforcement as Cloud AI Providers. When `AIR_GAP = true`, only Local MCP servers are eligible for ACTIVE state.
+
+All MCP-provided context MUST be injected exclusively through the Normalized Request Protocol (NRP) inputs.context field. MCP servers are prohibited from establishing direct data channels to Providers, Adapters, or Agents.
+
+**Context Ledger Rule:**
+Before MCP context is merged into any task, the Broker MUST emit a CONTEXT_EVENT containing the Signed Context Envelope hash, Provider ID, ProviderState, normalization function used, and timestamp. The event MUST be signed by both Broker and Core Law and committed to the Audit Ledger.
+
 **Compute-Orchestration Law:** OmniParser uses **Heuristic Routing** to determine where a task should run:
-- **Heavy Logic:** Routed to Gemini 1.5 Pro / Claude 3.5 (Cloud).
-- **Sensitive Logic / PII:** Forced to run on a **CERTIFIED Provider that satisfies the active policy rule `ALLOW_PII = true` and `NETWORK_ACCESS = false`.**
-- **Boilerplate / Simple UI:** Routed to **Groq** for sub-second execution.
+- **Heavy Logic:** Routed to the highest-capability **CERTIFIED Provider** based on policy, cost model, and performance profile (Cloud or Local).
+- **Sensitive Logic / PII:** Forced to run on a **CERTIFIED Provider that satisfies `ALLOW_PII = true`.**
+  If `NETWORK_ACCESS = false` is active, only LOCAL_AI or CLI_AGENT Providers are eligible.
+- **Boilerplate / Simple UI:** Routed to the fastest available **CERTIFIED Provider** (Cloud or Local).
 - **The "CFO" Budget Agent:** A specialized background monitor that calculates the estimated token cost of a task before it is sent to the swarm.
-  - **Budget Authority Rule:** The Budget Agent may propose a transition to BUDGET_PAUSED. Core Law must validate policy compliance and cryptographically sign the transition before it is committed to the Audit Ledger.
-  - **Authority Rule:** The Budget Agent may autonomously transition the system into BUDGET_PAUSED state but may never transition the system out of it. Resume authority is restricted to Architect or Owner signatures.
+  - **Budget Authority Rule:** The Budget Agent may trigger a mandatory transition request event for BUDGET_PAUSED. Core Law MUST validate policy compliance, verify the event signature, and cryptographically commit the state mutation to the Audit Ledger. The Budget Agent may never transition the system out of BUDGET_PAUSED. Resume authority is restricted to Architect or Owner signatures.
   - **Budget Pause Rule:** BUDGET_PAUSED does not modify ProviderState. It globally blocks transition into SWARM_DEPLOYED regardless of ProviderState.
   - **Budget Grace Rule:** When entering BUDGET_PAUSED, in-flight executions are allowed a maximum grace period (default 5 minutes). After expiry, the Broker MUST terminate remaining tasks and emit FAILURE events signed by Core Law.
   - **Budget Pause TTL Rule:**  
@@ -1076,9 +1161,19 @@ RegistryState:
   QUARANTINED      → Integrity failure, export-only mode
 ```
 
+**Registry State Transitions:**
+```
+HEALTHY → TEMPORARY_DEGRADED: When ≥1 certified provider unreachable
+TEMPORARY_DEGRADED → HEALTHY: When all certified providers restored
+TEMPORARY_DEGRADED → QUARANTINED: When integrity check fails
+QUARANTINED → HEALTHY: Owner-signed RECOVERY_OVERRIDE only
+```
+
+**Transition Authority:** Only Core Law may transition RegistryState. Execution Broker may propose transitions but Core Law must validate and sign all state changes.
+
 Discovery mode and Registry state are orthogonal properties.
 
-**Class Coverage Rule:** Providers from Cloud, Local, and CLI classes may be represented in the Registry based on user configuration and policy.
+**Class Coverage Rule:** Providers from CLOUD_AI, LOCAL_AI, CLI_AGENT, and CONTEXT classes may be represented in the Registry based on user configuration and policy.
 
 **Virtual Fallback Providers** may be instantiated for UI visualization only when explicitly enabled by policy or simulation mode. They are UI-visible placeholders only, never required for system operation, and may never participate in execution, routing decisions, or quorum consensus.
 
@@ -1093,7 +1188,9 @@ Fallback endpoints inherit the Provider ID they replace and do not increase regi
 Fallback endpoints inherit the Logical Provider ID but MUST expose a distinct Endpoint Instance ID.
 UI and Registry MUST surface Endpoint Instance ID for health, latency, and capability metrics to prevent telemetry ambiguity.
 
-**Offline Exception:** During first-run or air-gapped operation, the Provider Registry may enter a TEMPORARY_DEGRADED state where certified fallback providers are virtualized locally until cloud endpoints are reachable. All active Providers must pass certification and policy validation before entering SWARM_DEPLOYED state.
+**Offline Exception:** During first-run or air-gapped operation, the Provider Registry may enter a TEMPORARY_DEGRADED state where certified fallback providers are virtualized locally until Providers (Local AI or CLI_AGENT) are discovered, validated, and certified.
+Cloud AI Providers become eligible only when network policy allows external egress.
+All active Providers must pass certification and policy validation before entering SWARM_DEPLOYED state.
 
 ### 🧯 Failure Containment (State-Based)
 
@@ -1181,7 +1278,7 @@ Logical Providers are segmented by **ProviderState** to prevent cascade failure:
   - **Viewer:** Read-only access to specs, tasks, and audit logs
   - **Architect:** Approve specs, configure providers, set budgets, and mark domains as "Out of Scope"
   - **Operator:** Approve diffs and commit code changes
-  - **Owner:** Manage identities, access Secure Agentic Vault, and modify system policies (personal, team, or organizational scope)
+  - **Owner:** Manage identities, access Secure Agentic Vault, and modify system policies (authority scope)
   - **Authority Enforcement:** No Diff or Spec Promotion may occur without an Architect or Owner signature.
   - **Human Signature Law:** All human approvals must be signed using local private key or organization SSO identity token. Signatures are stored as detached cryptographic proofs in the Audit Ledger.
 - **Secure Agentic Vault:** Multi-provider API keys are never exposed to the AI. OmniParser acts as a secure "Identity Hub," providing agents with temporary, scoped OAuth tokens for external MCP servers (Slack, GitHub, Jira).
@@ -1201,7 +1298,7 @@ Users don't need to know the code; they only need to know the "Vibe."
 - **Kinetic Bento Grid:** A highly optimized UI using `OffscreenCanvas` and `Web Workers` to visualize the "Agent Swarm" activity in real-time. Physics calculations for the Dependency Map are handled by background threads to ensure the main UI remains responsive.
 - **Windows 11 Mica Effect:** Translucent app window that adopts the user's desktop color for seamless OS integration.
 - **Tactile Feedback:** When an agent is "Thinking," task cards pulse with subtle, high-frequency animations.
-- **The Swarm View:** A hexagonal grid displaying all **registry-visible Providers**—ACTIVE ones glow, CERTIFIED are dim-highlighted, fallback and virtual providers are dimmed.
+- **The Swarm View:** A hexagonal grid displaying all **registry-visible Providers (Cloud AI, Local AI, CLI)**—ACTIVE ones glow, CERTIFIED are dim-highlighted, fallback and virtual providers are dimmed.
   - **Efficiency Benchmarking:** The hexagonal grid also displays real-time "Accuracy %" and "Token Density" metrics for each certified AI Provider. You can see at a glance which AI is delivering the highest accuracy and efficiency for your workload.
 - **Spatial Dependency Map:** A visual canvas showing how a single line of Markdown in one file "gathers" data from three other files to create a sub-task.
 - **Project Health Dashboard:** Real-time operational metrics for project governance:
@@ -1228,12 +1325,12 @@ OmniParser exposes all **registered AI Providers** through a unified **Provider 
 ### Provider Configuration Modes
 Each Provider supports one or more of the following configuration paths:
 
-- **Cloud Provider**
+- **Cloud AI Provider**
   - API Key or OAuth-based authentication
   - Model selection from the live Provider Registry
   - Capability preview (context size, modalities, streaming, function support)
 
-- **Local Provider**
+- **Local AI Provider**
   - Local endpoint configuration (e.g., `http://localhost:11434`)
   - Model discovery via `/models`
   - Hardware capability detection (VRAM, RAM, GPU/CPU mode)
@@ -1266,6 +1363,7 @@ Every model in the dropdown MUST display:
 [ DISCOVERED ]     → Live fetched, unauthenticated
 [ MANUAL ]         → User-entered
 [ FALLBACK ]       → Static manifest / offline
+[ CONTEXT ]        → MCP server, context-only (never executes)
 ```
 
 **UI Trust State Visibility:** Intermediate provider states (VALIDATED, REGISTERED) are internal-only and never rendered in UI. Only final execution eligibility states are displayed.
@@ -1284,7 +1382,7 @@ Users can preview how OmniParser will route tasks:
 Users may enable:
 
 ```
-MODE = DISCOVERY_SIMULATION
+SYSTEM_STATE = DISCOVERY_SIMULATION
 ```
 
 This allows:
@@ -1297,7 +1395,7 @@ Using **unauthenticated discovered models**
 
 Execution remains hard-blocked.
 
-**Simulation Safety Rule:** `MODE = DISCOVERY_SIMULATION` hard-locks system state to `SPEC_LOCKED` and prohibits transition to `SWARM_DEPLOYED` regardless of Provider status.
+**Simulation Safety Rule:** `SYSTEM_STATE = DISCOVERY_SIMULATION` hard-locks system state to `SPEC_LOCKED` and prohibits transition to `SWARM_DEPLOYED` regardless of Provider status.
 
 ### Change Control
 - Any Provider configuration change triggers a **Swarm Revalidation Pass**
@@ -1315,8 +1413,8 @@ Execution remains hard-blocked.
 
 ## 🌐 Advanced Integrations (2026 Standard)
 
-- **MCP Server Hub:** Connect agents to local/cloud **Model Context Protocol** servers (Google Drive, Slack, SQL) to inject real-world context into tasks.
-  - **Offline Mode Restriction:** Cloud-based MCP servers are automatically disabled in offline mode. Only Local MCP servers may be queried.
+- **MCP Server Hub:** Connect agents to **local Model Context Protocol servers** (SQL mirrors, document stores, internal knowledge bases) to inject real-world context into tasks.
+  - **Offline Mode Restriction:** Only Local MCP servers may be queried.
 - **Vector Memory:** A local project database that "learns" your coding style and design preferences over time.
 - **Contextual "DNA" Persistence:** OmniParser maintains a **Long-Term Memory Vector Store** of your project's architectural decisions. If you chose "Modular Monolith" in Task 1, the agents will automatically reject "Microservices" patterns in Task 100 without being reminded.
 - **Immutable Project Snapshots (Time-Travel):** Captures the exact state of the project (MD + Code + Agent State) at every task milestone. Allows for one-click "Time-Travel" to revert the entire project if an agentic path fails.
@@ -1347,6 +1445,11 @@ OmniParser operates as a formal state machine to prevent race conditions, logica
 - **QUARANTINED:** Validation failure state; read-only mode, export-only, Owner intervention required
 - **ARCHIVED:** Project snapshot saved; system ready for new cycle
 
+DISCOVERY_SIMULATION is a constrained overlay mode on top of SPEC_LOCKED, not a standalone SystemState.
+
+**Precedence Rule:**
+RegistryState is absolute. If `RegistryState = QUARANTINED`, DISCOVERY_SIMULATION is suspended and the system enters export-only mode regardless of SystemState.
+
 ### Illegal Transitions
 
 The following state transitions are **strictly prohibited** and will trigger system halt:
@@ -1370,6 +1473,8 @@ All state transitions are:
 - Reversible only through explicit "Abort" or "Rollback" commands with Owner authority
 
 **Budget Resume Rule:** Exiting BUDGET_PAUSED requires a signed Architect or Owner override and a successful revalidation of Domain Coverage and Spec Version Hash.
+
+Budget resume requests MUST be rejected by Core Law if SystemState ≠ SPEC_LOCKED at the time of validation.
 
 **Quarantine Exit Rule:** The system may exit QUARANTINED state only through an Owner-signed RECOVERY_OVERRIDE action. This action triggers a full filesystem integrity scan, Spec Version Hash recomputation, Provider Registry re-certification, and Domain Coverage re-evaluation before allowing transition to IDLE or SPEC_LOCKED.
 
