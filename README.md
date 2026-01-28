@@ -218,7 +218,12 @@ Event (Canonical Schema v1) {
 **HLC Definition:**  
 Hybrid Logical Clock is encoded as `{ wall_time_unix_ms: u64, counter: u32, node_id: u16 }` and serialized in little-endian binary form before hashing and signing.
 
+**HLC Node Identity Rule:**
+In Governed Mode, node_id is assigned from the Raft cluster membership index and MUST be unique within the authority group.
+In Personal and Team Modes, node_id = 0x0001.
+
 **Schema Extension Rule:** `DISCOVERY_EVENT` is a specialization of `Event` with `type = DISCOVERY` and additional required fields `{endpoint_hash, auth_used, response_hash, model_count, discovery_confidence}`.
+DISCOVERY_EVENT fields extend the canonical Event schema and MUST be accepted by all schema validators as a valid specialization.
 
 **Discovery Event Authority:** DISCOVERY_EVENT must be signed by the **Execution Broker Key** and countersigned by Core Law before Ledger commit. Core Law MUST verify the Broker signature and attach its own cryptographic signature before the event is written to the Audit Ledger. This ensures discovery telemetry follows the same authority chain as execution events.
 
@@ -348,7 +353,7 @@ Models discovered without authentication:
 
 **2. Validate**
 
-- Execute health checks (`/models`, `--version`, sandbox execution test) on UNVALIDATED Providers
+- Execute health checks (`/models`, `--version`, sandbox execution test) on Providers in ProviderState = DISCOVERED
 - Verify binary signatures where available
 - Confirm full PAL contract compliance
 
@@ -709,7 +714,7 @@ OmniParser doesn't just "call" an AI; it orchestrates a **Hierarchical Swarm** a
 ### Adapter vs Provider Authority Law
 
 - **Adapters** are canonical system components shipped with OmniParser and are **zone-neutral**
-- **Provider Status (UNCERTIFIED / CERTIFIED / REVOKED)** applies to Logical Providers (user-configured endpoints or executables)
+- **Provider Status (UI Alias):** Presentation-only label derived from ProviderState (see Terminology Canon)
 - Certification, cost models, quorum eligibility, and policy enforcement are evaluated at the **Logical Provider level**, never at the Adapter level
 
 ### 🧩 Provider Abstraction Layer (PAL) — Mandatory Contract
