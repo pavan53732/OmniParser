@@ -54,7 +54,7 @@ System execution is governed by:
 - Policy and budget constraints
 
 **Provider lifecycle and routing visibility are governed by ProviderState.**
-**Execution eligibility is governed solely by `ProviderState = ACTIVE`.**
+**Execution eligibility is governed by the Canonical Execution Eligibility Formula (see Execution Eligibility Law).**
 
 No Provider may execute tasks unless it follows:
 DISCOVERED → VALIDATED → CERTIFIED → REGISTERED → ACTIVE
@@ -231,6 +231,9 @@ EventStatus:
   COMMITTED → Broker + Core signatures present
 ```
 Only **COMMITTED** events may be written to the Audit Ledger, replicated in Governed Mode, or used as authority proofs for State Transitions, Law Export, or Quorum decisions.
+
+**Endpoint Identity Rule:**
+`endpoint_instance_id` MUST be derivable from `{base_url_hash + tls_fingerprint}` and MUST correspond to the `endpoint_hash` used in DISCOVERY_EVENT.
 
 **HLC Definition:**  
 Hybrid Logical Clock is encoded as `{ wall_time_unix_ms: u64, counter: u32, node_id: u16 }` and serialized in little-endian binary form before hashing and signing.
@@ -768,7 +771,7 @@ ProviderAdapter {
     endpoint?: string
     class: "PUBLIC_CATALOG" | "AUTH_GATED"
     authRequiredForModels: boolean
-    discoveryConfidence: "unauthenticated" | "authenticated" | "verified"
+    discoveryConfidence: "unauthenticated" | "authenticated" | "attested"
     lastRefresh: HLC
   }
 
@@ -791,7 +794,7 @@ Adapters are canonical system components and are not subject to state classifica
 **Discovery Confidence Rule:**
 - `unauthenticated`: Model metadata fetched without authentication
 - `authenticated`: Model metadata fetched with valid credentials
-- `verified`: Model metadata fetched from a CERTIFIED provider (does not imply provider is certified because of discovery)
+- `attested`: Model metadata fetched from a CERTIFIED provider (does not imply provider is certified because of discovery)
 
 Providers that cannot implement this contract **cannot join the swarm**.
 
@@ -1017,6 +1020,9 @@ All MCP responses must be wrapped in a Signed Context Envelope issued by the Pro
   - **Budget Grace Rule:** When entering BUDGET_PAUSED, in-flight executions are allowed a maximum grace period (default 5 minutes). After expiry, the Broker MUST terminate remaining tasks and emit FAILURE events signed by Core Law.
   - **Budget Pause TTL Rule:**  
 BUDGET_PAUSED must include a signed expiration timestamp (default 24h). On expiry, the system transitions to SPEC_LOCKED and requires human revalidation before redeployment.
+
+**TTL Expiry Validation Rule:**
+TTL expiry transitions to SPEC_LOCKED only if Domain Coverage ≥ 95% remains valid. If coverage has degraded, system transitions to INTERROGATING and requires Phase 1 completion before SWARM_DEPLOYED is allowed.
   - **Hard Spending Caps:** Users can set a "Daily Token Budget" per project. If the Swarm reaches 90% of the budget, OmniParser pauses and triggers a "Budget Alert" popup.
   - **Budget Override Authority:** Only an Architect or Owner may raise spending caps or resume a paused swarm. All overrides require a signed justification recorded in the Audit Ledger.
   - **Spec Lock Dependency:** A paused swarm may only be resumed if system state is SPEC_LOCKED. Budget overrides cannot bypass spec validation or domain coverage gates.
