@@ -63,12 +63,30 @@ ProviderState:
   DISCOVERED    → Endpoint exists and is reachable
   VALIDATED     → Health checks passed, contract compliance confirmed
   CERTIFIED     → Authority signature issued by Core Law
-  REGISTERED    → Inserted into Provider Registry with policy gates applied
-  ACTIVE        → Eligible for task execution and quorum participation
-  REVOKED       → Blocked from all operations, ID reserved and non-reusable
+  REGISTERED    → Policy evaluation passed, health verified, eligible for routing
+  ACTIVE        → Execution-eligible (CERTIFIED + REGISTERED + POLICY_PASS + HEALTHY)
+  REVOKED       → Blocked from all operations, Endpoint Instance ID non-reusable
 ```
 
 **State Transition Authority:** Only Core Law may transition Providers between states. The Execution Broker may propose state changes, but Core Law must validate and sign all transitions.
+
+**Registration Rule:**
+CERTIFIED Providers enter REGISTERED state only if:
+- Policy evaluation passes (PII, domain, network, budget class)
+- Health status = HEALTHY
+- Registry integrity = HEALTHY
+
+REGISTERED Providers may be downgraded to CERTIFIED (without revocation) if:
+- Health degrades
+- Policy changes
+- Budget class changes
+
+**ACTIVE State Definition:**
+```
+ACTIVE = CERTIFIED + REGISTERED + POLICY_PASS + HEALTHY
+```
+
+Only ACTIVE Providers may execute tasks or participate in quorum.
 
 ### Execution Eligibility Law (Canonical)
 
@@ -178,8 +196,8 @@ Event (Canonical Schema v1) {
   source: UI | CORE | BROKER
   causal_refs: UUID[]
   provider_id?: string
-  provider_status?: "uncertified" | "certified" | "revoked"
-  discovery_confidence?: "unauthenticated" | "authenticated" | "certified"
+  provider_state?: "discovered" | "validated" | "certified" | "registered" | "active" | "revoked"
+  discovery_confidence?: "unauthenticated" | "authenticated" | "verified"
   hash: SHA-3
   signature: Dilithium (Post-Quantum)
   timestamp: hybrid_logical (HLC)
@@ -407,6 +425,12 @@ The Audit Ledger is the system of record. Provider Registry files and certificat
 **Registry Recovery Rule:**  
 If Provider Registry reconstruction fails, the system MUST enter QUARANTINED state and allow only Law Export and Ledger Repair operations until integrity is restored.
 
+**Quarantine Rule:**
+When RegistryState = QUARANTINED:
+- No Virtual Providers may be instantiated
+- No fallback routing may occur
+- UI is limited to Export, Ledger Repair, and Policy View
+
 **Windows Security Binding**
 
 OmniParser MUST integrate with native Windows security primitives:
@@ -486,12 +510,12 @@ To prevent interpretation drift across implementations, OmniParser defines the f
 - **Fallback Endpoint:** Operational replacement for unreachable certified provider (participates in routing)
 - **Virtual Provider:** UI-only placeholder for visualization in simulation mode (never executes)
 - **Discovery Class:** Authentication requirement for model discovery (PUBLIC_CATALOG, AUTH_GATED)
-- **Discovery Confidence:** Trust level of discovered models (unauthenticated, authenticated, certified)
+- **Discovery Confidence:** Trust level of discovered models (unauthenticated, authenticated, verified)
 
 **Discovery Confidence Mapping:**
 - `unauthenticated` → Discovered without API key or authentication
 - `authenticated` → Discovered with valid authentication credentials
-- `certified` → Authority-signed and execution-eligible (equivalent to Provider Status = CERTIFIED)
+- `verified` → Model metadata fetched from a CERTIFIED provider (orthogonal to provider certification)
 
 ---
 
@@ -684,7 +708,7 @@ ProviderAdapter {
     endpoint?: string
     class: "PUBLIC_CATALOG" | "AUTH_GATED"
     authRequiredForModels: boolean
-    discoveryConfidence: "unauthenticated" | "authenticated" | "certified"
+    discoveryConfidence: "unauthenticated" | "authenticated" | "verified"
     lastRefresh: HLC
   }
 
@@ -703,6 +727,11 @@ ProviderAdapter {
 **Certification Rule:**  
 Provider Status (UNCERTIFIED / CERTIFIED / REVOKED) is assigned to **Logical Providers** during Certification and stored in the Provider Registry.  
 Adapters are canonical system components and are not subject to certification state.
+
+**Discovery Confidence Rule:**
+- `unauthenticated`: Model metadata fetched without authentication
+- `authenticated`: Model metadata fetched with valid credentials
+- `verified`: Model metadata fetched from a CERTIFIED provider (does not imply provider is certified because of discovery)
 
 Providers that cannot implement this contract **cannot join the swarm**.
 
@@ -898,6 +927,7 @@ Enforcement is executed at the Provider Abstraction Layer and validated by Core 
 - **Boilerplate / Simple UI:** Routed to **Groq** for sub-second execution.
 - **The "CFO" Budget Agent:** A specialized background monitor that calculates the estimated token cost of a task before it is sent to the swarm.
   - **Authority Rule:** The Budget Agent may autonomously transition the system into BUDGET_PAUSED state but may never transition the system out of it. Resume authority is restricted to Architect or Owner signatures.
+  - **Budget Pause Rule:** BUDGET_PAUSED does not modify ProviderState. It globally blocks transition into SWARM_DEPLOYED regardless of ProviderState.
   - **Budget Pause TTL Rule:**  
 BUDGET_PAUSED must include a signed expiration timestamp (default 24h). On expiry, the system transitions to SPEC_LOCKED and requires human revalidation before redeployment.
   - **Hard Spending Caps:** Users can set a "Daily Token Budget" per project. If the Swarm reaches 90% of the budget, OmniParser pauses and triggers a "Budget Alert" popup.
@@ -967,13 +997,16 @@ Fallback endpoints inherit the Provider ID they replace and do not increase regi
 
 **Offline Exception:** During first-run or air-gapped operation, the Provider Registry may enter a TEMPORARY_DEGRADED state where certified fallback providers are virtualized locally until cloud endpoints are reachable. All active Providers must pass certification and policy validation before entering SWARM_DEPLOYED state.
 
-### 🧯 Failure Containment (Status-Based)
+### 🧯 Failure Containment (State-Based)
 
-Logical Providers are segmented by **certification status and health** to prevent cascade failure:
+Logical Providers are segmented by **ProviderState** to prevent cascade failure:
 
-- **CERTIFIED:** May execute tasks and participate in quorum
-- **UNCERTIFIED:** Discovery and simulation only
-- **REVOKED:** Fully isolated; blocked from routing and fallback
+- **ACTIVE:** May execute tasks and participate in quorum (CERTIFIED + REGISTERED + POLICY_PASS + HEALTHY)
+- **REGISTERED:** Certified but blocked by policy or health (routing-only visibility)
+- **CERTIFIED:** Identity verified, not yet registered
+- **VALIDATED:** Health checks passed, awaiting certification
+- **DISCOVERED:** Endpoint reachable, awaiting validation
+- **REVOKED:** Fully isolated; blocked from all operations
 
 ---
 
