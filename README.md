@@ -49,7 +49,7 @@ OmniParser does not enforce a minimum or maximum number of Providers.
 Users may enable any combination of Cloud, Local, or CLI Providers.
 
 System execution is governed by:
-- Provider certification status (UNCERTIFIED / CERTIFIED / REVOKED)
+- Provider state (DISCOVERED / VALIDATED / CERTIFIED / REGISTERED / ACTIVE / REVOKED_ENDPOINT / REVOKED_PROVIDER)
 - Health state
 - Policy and budget constraints
 
@@ -60,12 +60,13 @@ DISCOVERED → VALIDATED → CERTIFIED → REGISTERED → ACTIVE
 
 ```
 ProviderState:
-  DISCOVERED    → Endpoint exists and is reachable
-  VALIDATED     → Health checks passed, contract compliance confirmed
-  CERTIFIED     → Authority signature issued by Core Law
-  REGISTERED    → Policy evaluation passed, health verified, eligible for routing
-  ACTIVE        → Execution-eligible (CERTIFIED + REGISTERED + POLICY_PASS + HEALTHY)
-  REVOKED       → Blocked from all operations, Endpoint Instance ID non-reusable
+  DISCOVERED         → Endpoint exists and is reachable
+  VALIDATED          → Health checks passed, contract compliance confirmed
+  CERTIFIED          → Authority signature issued by Core Law
+  REGISTERED         → Policy evaluation passed, health verified, eligible for routing
+  ACTIVE             → Execution-eligible (CERTIFIED + REGISTERED + POLICY_PASS + HEALTHY)
+  REVOKED_ENDPOINT   → Endpoint Instance ID invalidated, Logical Provider returns to DISCOVERED
+  REVOKED_PROVIDER   → Logical Provider blocked from all operations (terminal)
 ```
 
 **State Transition Authority:** Only Core Law may transition Providers between states. The Execution Broker may propose state changes, but Core Law must validate and sign all transitions.
@@ -100,11 +101,15 @@ System may operate in DISCOVERY, SIMULATION, and SPEC modes without execution ca
 
 **Enforcement Order:**
 1. **Security / Legal / PII Policy Constraints** (non-bypassable)
-2. **Provider Certification Status** (ACTIVE required for execution)
+2. **Provider State** (ACTIVE required for execution)
 3. **Budget Enforcement** (may pause swarm, cannot override 1 or 2)
 4. **Routing Optimization** (performance and cost efficiency)
 
 Budget enforcement overrides routing optimization but **never** overrides Security, Legal, or PII policy constraints.
+
+**Visibility Rule:**
+ACTIVE indicates technical eligibility only. System execution eligibility is the conjunction of:
+`ProviderState = ACTIVE AND SystemState = SPEC_LOCKED`.
 
 ### Canonical Technology Stack
 
@@ -146,7 +151,7 @@ Purpose: CLI isolation, Provider I/O mediation, Diff generation, Tool mediation
 - **Container Runtime:** `Hyper-V VTL1 (Virtual Trust Level 1)` Isolation + Direct `HCS` (Host Compute Service) API calls.
   - **VTL1 Security:** Executes parts of the Broker in a Secure Mode (VTL1) that is invisible and untouchable even by a compromised OS kernel, similar to Windows Credential Guard.
   - **Silo Containers:** Uses raw HCS API to spin up "Silo" process containers in milliseconds, bypassing Docker overhead.
-  - **Capability Fallback:** If Hyper-V is unavailable (e.g., Windows Home), Broker enters SOFTWARE_SANDBOX mode using Restricted Tokens + Job Objects + Filesystem Overlay + Network Firewall Rules. UNCERTIFIED Logical Providers are disabled in this mode.
+  - **Capability Fallback:** If Hyper-V is unavailable (e.g., Windows Home), Broker enters SOFTWARE_SANDBOX mode using Restricted Tokens + Job Objects + Filesystem Overlay + Network Firewall Rules. Providers in DISCOVERED or VALIDATED states are disabled in this mode.
 - **Sandbox Policy Engine:** Windows Defender Application Control (WDAC) + Restricted Tokens + Job Objects + Hyper-V isolation
   - **Enforcement Model:** WDAC governs OmniParser system binaries only. Dynamic CLI agent execution is enforced via Restricted Tokens + Job Objects + Per-Process ACL sandboxing inside Hyper-V containers. WDAC policies are never modified at runtime.
 - **Filesystem Isolation:** Read-only mounts + Diff overlay
@@ -196,7 +201,7 @@ Event (Canonical Schema v1) {
   source: UI | CORE | BROKER
   causal_refs: UUID[]
   provider_id?: string
-  provider_state?: "discovered" | "validated" | "certified" | "registered" | "active" | "revoked"
+  provider_state?: "discovered" | "validated" | "certified" | "registered" | "active" | "revoked_endpoint" | "revoked_provider"
   discovery_confidence?: "unauthenticated" | "authenticated" | "verified"
   hash: SHA-3
   signature: Dilithium (Post-Quantum)
@@ -352,7 +357,7 @@ Providers in `DISCOVERY_MODE = MANUAL` are considered *Discovered* once base end
 **3. Certify**
 
 - Assign a **Logical Provider ID**
-- Assign **Provider Status (UNCERTIFIED → CERTIFIED or REVOKED)**
+- Transition Provider to **CERTIFIED** state
 - Generate a **Capability Manifest** including:
   - Discovery mode
   - Base URL hash
@@ -362,7 +367,7 @@ Providers in `DISCOVERY_MODE = MANUAL` are considered *Discovered* once base end
 
 **Certification Authority Rule:** Provider Certifications must be signed by the Core Law Authority Key. The Execution Broker may propose certification artifacts, but only Core Law may issue, sign, or revoke a Certification Hash. Certification keys are generated at first boot, stored in the Secure Agentic Vault, and bound to the Owner identity.
 
-**Endpoint Mutation Rule:** If Base URL hash or TLS fingerprint changes, Provider MUST be auto-revoked and re-enter CERTIFICATION state, even if logical Provider ID remains unchanged.
+**Endpoint Mutation Rule:** If Base URL hash or TLS fingerprint changes, Provider MUST transition to REVOKED_ENDPOINT state and return to DISCOVERED state with the same Logical Provider ID but new Endpoint Instance ID.
 
 **4. Register**
 
@@ -373,9 +378,13 @@ Providers in `DISCOVERY_MODE = MANUAL` are considered *Discovered* once base end
 **5. Revoke**
 
 - Automatically de-register Providers that fail health, policy, or trust checks
-- Mark **Endpoint Instance ID** as REVOKED in the Registry and Ledger
-- **Logical Provider ID** remains reserved for fallback inheritance
+- Mark **Endpoint Instance ID** as REVOKED_ENDPOINT (non-terminal, returns to DISCOVERED) or REVOKED_PROVIDER (terminal)
+- **Logical Provider ID** remains reserved for fallback inheritance in REVOKED_ENDPOINT case
 - Trigger **Swarm Revalidation**
+
+**Revocation Authority Rule:**
+- REVOKED_ENDPOINT: Endpoint-level failure (URL change, TLS mismatch, transient security issue) → Logical Provider may re-enter lifecycle
+- REVOKED_PROVIDER: Identity-level failure (Owner revocation, persistent policy violation, cryptographic compromise) → Terminal state
 
 **Provider Identity Model:**
 - **Logical Provider ID:** Permanent identity, survives revocation, inheritable by fallback endpoints
@@ -429,6 +438,7 @@ If Provider Registry reconstruction fails, the system MUST enter QUARANTINED sta
 When RegistryState = QUARANTINED:
 - No Virtual Providers may be instantiated
 - No fallback routing may occur
+- No MCP servers may inject context
 - UI is limited to Export, Ledger Repair, and Policy View
 
 **Windows Security Binding**
@@ -506,7 +516,11 @@ To prevent interpretation drift across implementations, OmniParser defines the f
 - **Certification Hash:** Cryptographic proof of Provider validation, signed by Core Law Authority Key
 - **Registry State:** Operational health status of the Provider Registry (HEALTHY, TEMPORARY_DEGRADED, QUARANTINED)
 - **Discovery Mode:** Method by which Provider models are enumerated (live, manual, static)
-- **Provider Status:** Certification state of a Logical Provider (UNCERTIFIED, CERTIFIED, REVOKED)
+- **Provider State:** Canonical lifecycle and trust state of a Logical Provider (DISCOVERED, VALIDATED, CERTIFIED, REGISTERED, ACTIVE, REVOKED_ENDPOINT, REVOKED_PROVIDER)
+- **Provider Status (UI Alias):** Presentation-only label derived from ProviderState:
+  - CERTIFIED → ProviderState ∈ {CERTIFIED, REGISTERED, ACTIVE}
+  - UNCERTIFIED → ProviderState ∈ {DISCOVERED, VALIDATED}
+  - REVOKED → ProviderState ∈ {REVOKED_ENDPOINT, REVOKED_PROVIDER}
 - **Fallback Endpoint:** Operational replacement for unreachable certified provider (participates in routing)
 - **Virtual Provider:** UI-only placeholder for visualization in simulation mode (never executes)
 - **Discovery Class:** Authentication requirement for model discovery (PUBLIC_CATALOG, AUTH_GATED)
@@ -658,7 +672,7 @@ OmniParser doesn't just "read" text; it prepares **"Structured AI Food"** with s
 - **The GPS System (Traceability):** Every requirement is parsed into an AST with line-number metadata. Code is literally "tethered" to the Markdown source.
 - **Markdown-as-Source:** OmniParser treats Markdown as a high-level declarative language. When you update a "Requirement ID" in the MD, OmniParser performs a hot-reload of the entire Task Ledger and identifies which existing code files are now "Out-of-Sync."
 - **Parallel Project Graph:** Reads all `.md` files in the workspace simultaneously to detect cross-file dependencies and logic gaps.
-- **Smart Chunking:** Breaks docs into "Logical Zones" to prevent AI context drift and ensure 100% focus.
+- **Smart Chunking:** Breaks docs into "Context Partitions" to prevent AI context drift and ensure 100% focus.
 - **Constraint Isolation:** Identifies ```code blocks``` as "Hard Laws" that agents cannot change, while treating text as "Fluid Tasks."
 - **Isolated Subagent Windows:** Each agent operates in its own isolated context window, preventing "context clutter" where agents get confused by each other's intermediate steps. This ensures clean, focused reasoning for every task.
 
@@ -713,7 +727,7 @@ ProviderAdapter {
   }
 
   trust: {
-    status: "uncertified" | "certified" | "revoked"
+    state: "discovered" | "validated" | "certified" | "registered" | "active" | "revoked_endpoint" | "revoked_provider"
     costModel: "verified" | "user-declared" | "heuristic"
     certificationHash: string
   }
@@ -725,8 +739,8 @@ ProviderAdapter {
 ```
 
 **Certification Rule:**  
-Provider Status (UNCERTIFIED / CERTIFIED / REVOKED) is assigned to **Logical Providers** during Certification and stored in the Provider Registry.  
-Adapters are canonical system components and are not subject to certification state.
+ProviderState is assigned to **Logical Providers** during lifecycle transitions and stored in the Provider Registry.  
+Adapters are canonical system components and are not subject to state classification.
 
 **Discovery Confidence Rule:**
 - `unauthenticated`: Model metadata fetched without authentication
@@ -838,8 +852,8 @@ A universal adapter for any endpoint implementing the OpenAI API contract, inclu
 - Future cloud providers
 
 **Adapter Status:** Canonical System Adapter (Mandatory, Zone-Neutral)  
-**Default Status:** UNCERTIFIED  
-**Promotion Rule:** Logical Providers instantiated through this adapter may execute only after successful CERTIFICATION.
+**Default State:** DISCOVERED  
+**Promotion Rule:** Logical Providers instantiated through this adapter may execute only after reaching ACTIVE state.
 
 **Required Configuration Fields:**
 - Base URL (`http://` or `https://`)
@@ -920,6 +934,25 @@ REVOKED MCP servers:
 - Are fully blocked
 
 Enforcement is executed at the Provider Abstraction Layer and validated by Core Law before request dispatch.
+
+### MCP Provider Governance Law (Mandatory)
+
+MCP servers are treated as **Logical Providers of class "context"** and MUST follow the same ProviderState lifecycle as execution providers.
+
+**MCP State Machine:**
+- MCP servers enter the Provider State Machine at DISCOVERED
+- Must pass VALIDATED → CERTIFIED → REGISTERED → ACTIVE before context injection
+- Are subject to the same policy gates (PII, domain restrictions, health checks)
+- Must emit signed context envelopes validated by Core Law
+
+**MCP Policy Enforcement:**
+- ACTIVE MCP servers may inject context into task execution
+- CERTIFIED (but not REGISTERED) MCP servers may be queried for simulation only
+- DISCOVERED/VALIDATED MCP servers are UI-visible but execution-blocked
+- REVOKED_PROVIDER MCP servers are fully blocked from all operations
+
+**MCP Context Authority Rule:**
+All MCP responses must be wrapped in a Signed Context Envelope issued by the Provider Abstraction Layer. Core Law must verify the envelope signature and source ProviderState before allowing MCP data to be merged into task context.
 
 **Compute-Orchestration Law:** OmniParser uses **Heuristic Routing** to determine where a task should run:
 - **Heavy Logic:** Routed to Gemini 1.5 Pro / Claude 3.5 (Cloud).
@@ -1156,7 +1189,8 @@ Each Provider entry displays:
 Every model in the dropdown MUST display:
 
 ```
-[ CERTIFIED ]      → Provider certified and execution-eligible
+[ ACTIVE ]         → Execution-eligible (policy + health + certification passed)
+[ CERTIFIED ]      → Certified, not yet execution-eligible
 [ DISCOVERED ]     → Live fetched, unauthenticated
 [ MANUAL ]         → User-entered
 [ FALLBACK ]       → Static manifest / offline
@@ -1166,7 +1200,7 @@ Every model in the dropdown MUST display:
 
 **Execution Rule**
 
-Only models labeled `[CERTIFIED]` may be routed to SWARM_DEPLOYED state.
+Only models labeled `[ACTIVE]` may be routed to SWARM_DEPLOYED state.
 
 ### Routing Visibility
 Users can preview how OmniParser will route tasks:
