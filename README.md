@@ -56,13 +56,37 @@ System execution is governed by:
 No Provider may execute tasks unless it follows:
 DISCOVERED → VALIDATED → CERTIFIED → REGISTERED → ACTIVE
 
+### Provider State Machine (Canonical)
+
+```
+ProviderState:
+  DISCOVERED    → Endpoint exists and is reachable
+  VALIDATED     → Health checks passed, contract compliance confirmed
+  CERTIFIED     → Authority signature issued by Core Law
+  REGISTERED    → Inserted into Provider Registry with policy gates applied
+  ACTIVE        → Eligible for task execution and quorum participation
+  REVOKED       → Blocked from all operations, ID reserved and non-reusable
+```
+
+**State Transition Authority:** Only Core Law may transition Providers between states. The Execution Broker may propose state changes, but Core Law must validate and sign all transitions.
+
 ### Execution Eligibility Law (Canonical)
 
-**Swarm execution requires ≥ 1 ACTIVE + CERTIFIED Provider.**
+**Swarm execution requires ≥ 1 Provider in ACTIVE state.**
 
 System may operate in DISCOVERY, SIMULATION, and SPEC modes without execution capability when this requirement is not met.
 
-**Quorum Law:** Only Providers with `Provider Status = CERTIFIED` may participate in quorum voting or consensus-based task approval.
+**Quorum Law:** Only Providers with `ProviderState = ACTIVE` may participate in quorum voting or consensus-based task approval.
+
+### Policy Precedence Law (Canonical)
+
+**Enforcement Order:**
+1. **Security / Legal / PII Policy Constraints** (non-bypassable)
+2. **Provider Certification Status** (ACTIVE required for execution)
+3. **Budget Enforcement** (may pause swarm, cannot override 1 or 2)
+4. **Routing Optimization** (performance and cost efficiency)
+
+Budget enforcement overrides routing optimization but **never** overrides Security, Legal, or PII policy constraints.
 
 ### Canonical Technology Stack
 
@@ -166,6 +190,8 @@ Event (Canonical Schema v1) {
 Hybrid Logical Clock is encoded as `{ wall_time_unix_ms: u64, counter: u32, node_id: u16 }` and serialized in little-endian binary form before hashing and signing.
 
 **Schema Extension Rule:** `DISCOVERY_EVENT` is a specialization of `Event` with `type = DISCOVERY` and additional required fields `{endpoint_hash, auth_used, response_hash, model_count}`.
+
+**Discovery Event Authority:** DISCOVERY_EVENT must be signed by the **Execution Broker Key** and countersigned by Core Law before Ledger commit. This ensures discovery telemetry follows the same authority chain as execution events.
 
 **Provider Event Rule:** Providers may only return responses to the Execution Broker. All externally sourced events must be re-issued, signed, and attributed by the Broker before entering the Audit Ledger.
 
@@ -329,8 +355,14 @@ Providers in `DISCOVERY_MODE = MANUAL` are considered *Discovered* once base end
 **5. Revoke**
 
 - Automatically de-register Providers that fail health, policy, or trust checks
-- Mark Logical Provider ID as REVOKED in the Registry and Ledger (ID remains reserved and non-reusable)
+- Mark **Endpoint Instance ID** as REVOKED in the Registry and Ledger
+- **Logical Provider ID** remains reserved for fallback inheritance
 - Trigger **Swarm Revalidation**
+
+**Provider Identity Model:**
+- **Logical Provider ID:** Permanent identity, survives revocation, inheritable by fallback endpoints
+- **Endpoint Instance ID:** Bound to specific Base URL + TLS fingerprint, revoked on mutation
+- Fallback endpoints inherit **Logical Provider ID** but receive new **Endpoint Instance ID**
 
 **Hard Law:** No Provider may execute a task unless it is **Discovered, Certified, and Registered**.
 
@@ -446,6 +478,7 @@ To prevent interpretation drift across implementations, OmniParser defines the f
 - **Endpoint:** The physical network address or executable path of a Provider
 - **Adapter:** Canonical system software component implementing the Provider Abstraction Layer (PAL) contract for a specific Provider class. Adapters are zone-neutral and not subject to trust classification.
 - **Logical Provider ID:** Persistent identifier for a Provider, independent of endpoint changes
+- **Endpoint Instance ID:** Rotatable binding for a specific endpoint configuration (Base URL + TLS fingerprint)
 - **Certification Hash:** Cryptographic proof of Provider validation, signed by Core Law Authority Key
 - **Registry State:** Operational health status of the Provider Registry (HEALTHY, TEMPORARY_DEGRADED, QUARANTINED)
 - **Discovery Mode:** Method by which Provider models are enumerated (live, manual, static)
@@ -453,7 +486,12 @@ To prevent interpretation drift across implementations, OmniParser defines the f
 - **Fallback Endpoint:** Operational replacement for unreachable certified provider (participates in routing)
 - **Virtual Provider:** UI-only placeholder for visualization in simulation mode (never executes)
 - **Discovery Class:** Authentication requirement for model discovery (PUBLIC_CATALOG, AUTH_GATED)
-- **Discovery Confidence:** Trust level of discovered models (unauthenticated, authenticated, verified)
+- **Discovery Confidence:** Trust level of discovered models (unauthenticated, authenticated, certified)
+
+**Discovery Confidence Mapping:**
+- `unauthenticated` → Discovered without API key or authentication
+- `authenticated` → Discovered with valid authentication credentials
+- `certified` → Authority-signed and execution-eligible (equivalent to Provider Status = CERTIFIED)
 
 ---
 
@@ -646,7 +684,7 @@ ProviderAdapter {
     endpoint?: string
     class: "PUBLIC_CATALOG" | "AUTH_GATED"
     authRequiredForModels: boolean
-    discoveryConfidence: "unauthenticated" | "authenticated" | "verified"
+    discoveryConfidence: "unauthenticated" | "authenticated" | "certified"
     lastRefresh: HLC
   }
 
@@ -821,7 +859,7 @@ Users may enable any Provider Adapter. Routing, quorum, and governance eligibili
 - `user-declared`: Eligible for routing but excluded from quorum
 - `heuristic`: Restricted to simulation and non-quorum execution
 
-**Budget Precedence Rule:** Budget enforcement overrides routing **except for Security, Legal, and PII policy constraints.**
+**Budget Precedence Rule:** Budget enforcement overrides routing optimization but **never** overrides Security, Legal, or PII policy constraints. See Policy Precedence Law (Phase 0) for complete enforcement hierarchy.
 
 ---
 
@@ -1090,6 +1128,8 @@ Every model in the dropdown MUST display:
 [ MANUAL ]         → User-entered
 [ FALLBACK ]       → Static manifest / offline
 ```
+
+**UI Trust State Visibility:** Intermediate provider states (VALIDATED, REGISTERED) are internal-only and never rendered in UI. Only final execution eligibility states are displayed.
 
 **Execution Rule**
 
