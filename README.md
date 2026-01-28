@@ -98,6 +98,14 @@ Only ACTIVE Providers may execute tasks or participate in quorum.
 
 System may operate in DISCOVERY, SIMULATION, and SPEC modes without execution capability when this requirement is not met.
 
+**Canonical Execution Eligibility Formula:**
+```
+ExecutionEligible =
+  ProviderState = ACTIVE
+  AND RegistryState ≠ QUARANTINED
+  AND SystemState = SPEC_LOCKED
+```
+
 **Quorum Law:** Only Providers with `ProviderState = ACTIVE` may participate in quorum voting or consensus-based task approval.
 
 ### Policy Precedence Law (Canonical)
@@ -204,8 +212,9 @@ Event (Canonical Schema v1) {
   source: UI | CORE | BROKER
   causal_refs: UUID[]
   provider_id?: string
+  endpoint_instance_id?: string
   provider_state?: "discovered" | "validated" | "certified" | "registered" | "active" | "revoked_endpoint" | "revoked_provider"
-  discovery_confidence?: "unauthenticated" | "authenticated" | "verified"
+  discovery_confidence?: "unauthenticated" | "authenticated" | "attested"
   hash: SHA-3
   signature: {
     broker: Dilithium
@@ -214,6 +223,14 @@ Event (Canonical Schema v1) {
   timestamp: hybrid_logical (HLC)
 }
 ```
+
+**Event Validity Rule:**
+```
+EventStatus:
+  PROPOSED  → Broker signature present, Core signature absent
+  COMMITTED → Broker + Core signatures present
+```
+Only **COMMITTED** events may be written to the Audit Ledger, replicated in Governed Mode, or used as authority proofs for State Transitions, Law Export, or Quorum decisions.
 
 **HLC Definition:**  
 Hybrid Logical Clock is encoded as `{ wall_time_unix_ms: u64, counter: u32, node_id: u16 }` and serialized in little-endian binary form before hashing and signing.
@@ -558,7 +575,7 @@ To prevent interpretation drift across implementations, OmniParser defines the f
 **Discovery Confidence Mapping:**
 - `unauthenticated` → Discovered without API key or authentication
 - `authenticated` → Discovered with valid authentication credentials
-- `verified` → Model metadata fetched from a CERTIFIED provider (orthogonal to provider certification)
+- `attested` → Model metadata fetched from a CERTIFIED provider (orthogonal to provider certification)
 
 ---
 
@@ -970,6 +987,10 @@ Enforcement is executed at the Provider Abstraction Layer and validated by Core 
 
 MCP servers are treated as **Logical Providers of class "context"** and MUST follow the same ProviderState lifecycle as execution providers.
 
+**Context Budget Law (Non-Bypassable):**
+MCP context injection MUST be metered in normalized token units and included in Budget Agent preflight cost calculations.
+If projected MCP context would exceed remaining budget or task token limits, Core Law MUST truncate or block context injection before task dispatch.
+
 **MCP State Machine:**
 - MCP servers enter the Provider State Machine at DISCOVERED
 - Must pass VALIDATED → CERTIFIED → REGISTERED → ACTIVE before context injection
@@ -1330,6 +1351,10 @@ The following state transitions are **strictly prohibited** and will trigger sys
 - `AWAITING_APPROVAL → INGESTING` (must complete or reject current cycle)
 - `BUDGET_PAUSED → COMMITTING` (cannot commit while budget enforcement is active)
 - `BUDGET_PAUSED → SWARM_DEPLOYED` (must return to SPEC_LOCKED or receive signed override first)
+
+**Budget Grace Transition Rule:**
+While in `BUDGET_PAUSED`, the system MAY transition to `AWAITING_APPROVAL` for tasks that complete within the configured grace window.
+Transition to `COMMITTING` remains prohibited until a signed Architect or Owner override returns the system to `SPEC_LOCKED`.
 
 ### State Enforcement
 
